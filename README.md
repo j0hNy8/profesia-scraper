@@ -13,7 +13,7 @@ A zero-LLM-token Node.js scraper that connects to an OpenClaw-managed browser pr
 
 ## Prerequisites
 - Node.js (v18+)
-- [OpenClaw](https://github.com/example/openclaw) installed and configured.
+- [OpenClaw](https://github.com/openclaw/openclaw) installed and configured.
 
 ## Usage
 1. Clone the repository.
