@@ -23,8 +23,8 @@ Before performing any other actions, you must lock your state to prevent duplica
 
 ### Step 1: Target Identification
 1. Read the `report.md` file.
-2. Identify all companies listed under **Strong Matches**. 
-3. If there are no Strong Matches, identify companies listed under **Potential Matches**.
+2. Identify the specific companies the user has explicitly selected for research. (This selection will be provided in the current conversation context or appended to the report).
+3. Do NOT automatically research all 'Strong' or 'Potential' matches unless explicitly instructed.
 4. Convert each company name into a URL-friendly slug (e.g., "Zebra Technologies" -> `zebra-technologies`).
 
 ### Step 2: Web Reconnaissance
