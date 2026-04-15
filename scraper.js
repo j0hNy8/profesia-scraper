@@ -20,7 +20,8 @@ const { execFile } = require('child_process');
 
 // --- Config ---
 const BROWSER_PORT = Number(process.env.OPENCLAW_CDP_PORT || 18800);
-const OPENCLAW_BIN = process.env.OPENCLAW_BIN || 'openclaw';
+const OPENCLAW_BIN = process.env.OPENCLAW_BIN || '/home/ubuntu/.nvm/versions/node/v22.22.0/bin/openclaw';
+//const OPENCLAW_BIN = process.env.OPENCLAW_BIN || 'openclaw';
 const OPENCLAW_BROWSER_PROFILE = process.env.OPENCLAW_BROWSER_PROFILE || 'openclaw';
 
 const BASE_URL = 'https://www.profesia.sk/praca/bratislava/informacne-technologie/?count_days=7&jobtypes[]=1&offer_agent_flags=12484&salary=1600&salary_period=m&skills[]=73__5_';
@@ -48,10 +49,10 @@ const EXCLUDE_KEYWORDS = [
   'designer', 'ui/ux', 'ux/ui', 'marketing',
 
   // Seniority / overlevel
-  'senior', 'lead', 'principal', 'head', 'manager', 'expert', 'architect',
+  'lead', 'principal', 'head', 'manager', 'expert',
 
   // Infra / security / platform
-  'devops', 'sre', 'site reliability', 'cloud engineer', 'cloud architect',
+  'sre', 'site reliability', 'cloud engineer', 'cloud architect',
   'platform engineer', 'infrastructure engineer', 'network engineer',
   'security engineer', 'security analyst', 'soc',
 
@@ -206,13 +207,13 @@ async function isCdpUp() {
   }
 }
 
-function openclawBrowserStart() {
+function runOpenClaw(args, timeout = 45_000) {
   return new Promise((resolve, reject) => {
-    const args = ['browser', '--browser-profile', OPENCLAW_BROWSER_PROFILE, 'start'];
-    execFile(OPENCLAW_BIN, args, { timeout: 45_000 }, (err, stdout, stderr) => {
+    execFile(OPENCLAW_BIN, args, { timeout }, (err, stdout, stderr) => {
       if (err) {
-        const msg = (stderr || stdout || err.message || '').trim();
-        reject(new Error(`Failed to start browser via "${OPENCLAW_BIN} ${args.join(' ')}": ${msg}`));
+        err.stdout = String(stdout || '');
+        err.stderr = String(stderr || '');
+        reject(err);
         return;
       }
       resolve({ stdout: String(stdout || ''), stderr: String(stderr || '') });
@@ -220,22 +221,89 @@ function openclawBrowserStart() {
   });
 }
 
+function clearStaleChromiumSingletons() {
+  const userDataDir = path.join(
+    process.env.OPENCLAW_BROWSER_USER_DATA_DIR || path.join('/home/ubuntu/.openclaw/browser', OPENCLAW_BROWSER_PROFILE),
+    'user-data'
+  );
+
+  const singletonFiles = ['SingletonLock', 'SingletonSocket', 'SingletonCookie'];
+  let removed = 0;
+
+  for (const name of singletonFiles) {
+    const target = path.join(userDataDir, name);
+    try {
+      if (fs.existsSync(target) || fs.lstatSync(target).isSymbolicLink()) {
+        fs.rmSync(target, { force: true });
+        removed++;
+      }
+    } catch {
+      // ignore: missing file, broken symlink, or unreadable state
+    }
+  }
+
+  if (removed > 0) {
+    console.log(`[profesia-scout] Cleared ${removed} stale Chromium profile lock file(s) from ${userDataDir}`);
+  }
+}
+
+async function getOpenClawBrowserAvailabilityHint() {
+  try {
+    const { stdout } = await runOpenClaw(['plugins', 'inspect', 'browser'], 15_000);
+    const info = stdout.trim();
+
+    if (/Status:\s*disabled/i.test(info) && /not in allowlist/i.test(info)) {
+      return 'Bundled OpenClaw browser plugin is installed but disabled by the current plugins.allow allowlist. Add "browser" to plugins.allow (or remove the restrictive allowlist), then restart the gateway so the `openclaw browser` command is registered again.';
+    }
+
+    if (/Status:\s*disabled/i.test(info)) {
+      return 'Bundled OpenClaw browser plugin is installed but disabled. Re-enable the browser plugin and restart the gateway so the `openclaw browser` command is registered again.';
+    }
+
+    return `OpenClaw browser plugin inspection output:\n${info}`;
+  } catch (err) {
+    const msg = String(err.stderr || err.stdout || err.message || '').trim();
+    return `Could not inspect OpenClaw browser plugin state automatically${msg ? `: ${msg}` : '.'}`;
+  }
+}
+
+async function openclawBrowserStart() {
+  const args = ['browser', '--browser-profile', OPENCLAW_BROWSER_PROFILE, 'start'];
+  try {
+    return await runOpenClaw(args, 45_000);
+  } catch (err) {
+    const msg = String(err.stderr || err.stdout || err.message || '').trim();
+    if (/unknown command ['"]browser['"]/i.test(msg)) {
+      const hint = await getOpenClawBrowserAvailabilityHint();
+      throw new Error(`Failed to start browser via "${OPENCLAW_BIN} ${args.join(' ')}": ${msg}\n${hint}`);
+    }
+
+    if (/cdp websocket.*not reachable after start/i.test(msg)) {
+      console.log(`[profesia-scout] OpenClaw reported a transient browser start race: ${msg}`);
+      return { stdout: String(err.stdout || ''), stderr: String(err.stderr || '') };
+    }
+
+    throw new Error(`Failed to start browser via "${OPENCLAW_BIN} ${args.join(' ')}": ${msg}`);
+  }
+}
+
 async function ensureBrowserCdpReady() {
   if (await isCdpUp()) return;
 
+  clearStaleChromiumSingletons();
   console.log(`[profesia-scout] Browser CDP not reachable on 127.0.0.1:${BROWSER_PORT}. Starting OpenClaw browser profile "${OPENCLAW_BROWSER_PROFILE}"...`);
   await openclawBrowserStart();
 
   const start = Date.now();
-  const timeoutMs = Number(process.env.OPENCLAW_CDP_START_TIMEOUT_MS || 20_000);
+  const timeoutMs = Number(process.env.OPENCLAW_CDP_START_TIMEOUT_MS || 30_000);
   while (Date.now() - start < timeoutMs) {
     if (await isCdpUp()) {
       console.log('[profesia-scout] Browser CDP is up.');
       return;
     }
-    await sleep(250);
+    await sleep(500);
   }
-  throw new Error(`Browser CDP still not reachable on 127.0.0.1:${BROWSER_PORT} after ${timeoutMs}ms. Try: openclaw browser --browser-profile ${OPENCLAW_BROWSER_PROFILE} status`);
+  throw new Error(`Browser CDP still not reachable on 127.0.0.1:${BROWSER_PORT} after ${timeoutMs}ms. If the bundled OpenClaw browser plugin is enabled, try: openclaw browser --browser-profile ${OPENCLAW_BROWSER_PROFILE} status`);
 }
 
 // --- Extraction JS ---
